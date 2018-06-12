@@ -18,6 +18,8 @@ typedef struct _ThreadParam {
     int id;
 } ThreadParam;
 
+bool transpose = false;
+
 void matrix_create(Matrix *thiz, int size)
 {
     thiz->size = size;
@@ -92,14 +94,25 @@ void matrix_mul(const Matrix *A, const Matrix *B, Matrix *C)
 {
     matrix_check_AB_try_create_C(A, B, C);
     int size = A->size;
-    for (int i = 0; i < size; ++i) {
-        for (int j = 0; j < size; ++j) {
-            C->v[i][j] = 0;
+    if(transpose) {
+        for (int i = 0; i < size; ++i) {
             for (int k = 0; k < size; ++k) {
-                C->v[i][j] += A->v[i][k] * B->v[k][j];
+                for (int j = 0; j < size; ++j) {
+                    C->v[i][j] += A->v[i][k] * B->v[k][j];
+                }
+            }
+        }
+    } else {
+        for (int i = 0; i < size; ++i) {
+            for (int j = 0; j < size; ++j) {
+                C->v[i][j] = 0;
+                for (int k = 0; k < size; ++k) {
+                    C->v[i][j] += A->v[i][k] * B->v[k][j];
+                }
             }
         }
     }
+    
 }
 
 void matrix_divide_4(const Matrix *thiz, Matrix *block)
@@ -242,18 +255,33 @@ int main(int argc, const char **argv)
 
     switch (mul_type) {
     case 0:
+        printf("Matrix multiplication using ordinary method: \n");
         matrix_mul(&A, &B, &C);
         break;
     case 1:
-        strassen_mul(&A, &B, &C, false);
+        printf("Matrix multiplication using ordinary method\nwith cache friendly utilization: \n");
+        transpose = true;
+        matrix_mul(&A, &B, &C);
         break;
     case 2:
+        printf("Matrix multiplication using strassen method: \n");
+        strassen_mul(&A, &B, &C, false);
+        break;
+    case 3:
+        printf("Matrix multiplication using multithreaded strassen method: \n");
+        strassen_mul(&A, &B, &C, true);
+        break;
+    case 4:
+        printf("Matrix multiplication using multithreaded strassen method\nwith cache friendly utilization: \n");
+        transpose = true;
         strassen_mul(&A, &B, &C, true);
         break;
     default:
         fprintf(stderr, "wrong mul type (argv[2])");
         exit(EXIT_FAILURE);
     }
+
+    // matrix_print(C);
 
     gettimeofday(&end, NULL);
     int time_spent = (1e6) * (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec);
