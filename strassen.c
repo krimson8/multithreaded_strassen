@@ -1,20 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <time.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <assert.h>
 #include <string.h>
+#include <sys/time.h>
 
 
 int n;
-
-int NUM_THREAD;
 
 typedef struct _Matrix {
     int **v;
     int size;
 } Matrix;
+
+typedef struct _ThreadParam {
+    Matrix *A, *B, *M, *tmp;
+    int id;
+} ThreadParam;
 
 int thread_count = 4;
 pthread_mutex_t mutexA = PTHREAD_MUTEX_INITIALIZER;
@@ -91,7 +96,7 @@ void matrix_sub(const Matrix *A, const Matrix *B, Matrix *C)
     } 
 }
 
-void matrix_mul(Matrix *A, Matrix *B, Matrix *C)
+void matrix_mul(const Matrix *A, const Matrix *B, Matrix *C)
 {
     matrix_check_AB_try_create_C(A, B, C);
     int size = A->size;
@@ -134,9 +139,56 @@ void matrix_combine_4(Matrix *thiz, Matrix *block)
     }
 }
 
-void _strassen_mul(const Matrix *A, const Matrix *B, Matrix **M, Matrix **tmp)
+void _strassen_mul(const Matrix *A, const Matrix *B, Matrix *M, Matrix *tmp, const int id)
+{
+    if (id == -1 || id == 0) {
+        matrix_add(&A[0], &A[3], &tmp[0]);
+        matrix_add(&B[0], &B[3], &tmp[1]);
+        matrix_mul(&tmp[0], &tmp[1], &M[0]);
+    }
 
-void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel, int id)
+    if (id == -1 || id == 1) {
+        matrix_add(&A[2], &A[3], &tmp[2]);
+        matrix_mul(&tmp[2], &B[0], &M[1]);
+    }
+
+    if (id == -1 || id == 2) {
+        matrix_sub(&B[1], &B[3], &tmp[3]);
+        matrix_mul(&A[0], &tmp[3], &M[2]);
+    }
+
+    if (id == -1 || id == 3) {
+        matrix_sub(&B[2], &B[0], &tmp[4]);
+        matrix_mul(&A[3], &tmp[4], &M[3]);
+    }
+
+
+    if (id == -1 || id == 4) {
+        matrix_add(&A[0], &A[1], &tmp[5]);
+        matrix_mul(&tmp[5], &B[3], &M[4]);
+    }
+
+    if (id == -1 || id == 5) {
+        matrix_sub(&A[2], &A[0], &tmp[6]);
+        matrix_add(&B[0], &B[1], &tmp[7]);
+        matrix_mul(&tmp[6], &tmp[7], &M[5]);
+    }
+
+    if (id == -1 || id == 6) {
+        matrix_sub(&A[1], &A[3], &tmp[8]);
+        matrix_add(&B[2], &B[3], &tmp[9]);
+        matrix_mul(&tmp[8], &tmp[9], &M[6]);
+    }
+}
+
+void* pthread_func(void *arg)
+{
+    ThreadParam *t = (ThreadParam*)arg; 
+    _strassen_mul(t->A, t->B, t->M, t->tmp, t->id);
+    pthread_exit(NULL);
+}
+
+void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel)
 {
     Matrix A[4] = {0}, 
            B[4] = {0}, 
@@ -147,49 +199,22 @@ void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel, in
     matrix_divide_4(A_all, A);
     matrix_divide_4(B_all, B);
 
-    _strassen_mul(A, B, &M, &tmp, id);
+    if (parallel) {
+        int num_thread = 7;
+        pthread_t thread[num_thread];
+        ThreadParam thread_param[num_thread];
 
-    //********** parallel if needed **************
-    if (!parallel || id == 0) {
-        matrix_add(&A[0], &A[3], &tmp[0]);
-        matrix_add(&B[0], &B[3], &tmp[1]);
-        matrix_mul(&tmp[0], &tmp[1], &M[0]);
+        for(int i = 0; i < num_thread; i++) {
+            ThreadParam t = {.A=A, .B=B, .M=M, .tmp=tmp, .id = i};
+            memcpy(&thread_param[i], &t, sizeof(ThreadParam));
+            pthread_create(&thread[i], NULL, pthread_func, &thread_param[i]);
+        }
+        for(int i = 0; i < num_thread; i++) {
+            pthread_join(thread[i], NULL);
+        }
+    } else {
+        _strassen_mul(A, B, M, tmp, -1);
     }
-
-    if (!parallel || id == 1) {
-        matrix_add(&A[2], &A[3], &tmp[2]);
-        matrix_mul(&tmp[2], &B[0], &M[1]);
-    }
-
-    if (!parallel || id == 2) {
-        matrix_sub(&B[1], &B[3], &tmp[3]);
-        matrix_mul(&A[0], &tmp[3], &M[2]);
-    }
-
-    if (!parallel || id == 3) {
-        matrix_sub(&B[2], &B[0], &tmp[4]);
-        matrix_mul(&A[3], &tmp[4], &M[3]);
-    }
-
-
-    if (!parallel || id == 4) {
-        matrix_add(&A[0], &A[1], &tmp[5]);
-        matrix_mul(&tmp[5], &B[3], &M[4]);
-    }
-
-    if (!parallel || id == 5) {
-        matrix_sub(&A[2], &A[0], &tmp[6]);
-        matrix_add(&B[0], &B[1], &tmp[7]);
-        matrix_mul(&tmp[6], &tmp[7], &M[5]);
-    }
-
-    if (!parallel || id == 6) {
-        matrix_sub(&A[1], &A[3], &tmp[8]);
-        matrix_add(&B[2], &B[3], &tmp[9]);
-        matrix_mul(&tmp[8], &tmp[9], &M[6]);
-    }
-
-    //********** end of parallel section **************
 
     matrix_add(&M[0], &M[3], &tmp[0]);
     matrix_sub(&tmp[0], &M[4], &tmp[0]);
@@ -203,16 +228,11 @@ void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel, in
     matrix_combine_4(C_all, C);
 }
 
-void* child(void *arg)
-{
-    pthread_exit(NULL);
-}
-
 int main(int argc, const char **argv) 
 { 
 
-    if (argc != 4) {
-        puts("./main path/to/test/data type_of_mul num_thread");
+    if (argc != 3) {
+        puts("./main path/to/test/data type_of_mul");
         exit(EXIT_FAILURE);
     }
 
@@ -221,8 +241,7 @@ int main(int argc, const char **argv)
         perror(argv[1]);
         exit(EXIT_FAILURE);
     }
-
-    NUM_THREAD = atoi(argv[3]);
+    int mul_type = atoi(argv[2]);
 
     Matrix A = {0}, 
            B = {0}, 
@@ -234,33 +253,24 @@ int main(int argc, const char **argv)
     matrix_read(&B, fp);
     fclose(fp);
 
-    clock_t begin, end; 
-    double time_spent;
+    struct timeval start, end;
+    gettimeofday(&start, NULL);
 
-    begin = clock();
-    if (atoi(argv[2]) == 0) {
+    switch (mul_type) {
+    case 0:
         matrix_mul(&A, &B, &C);
-    } else {
-        strassen(&A, &B, &C);
+        break;
+    case 1:
+        strassen_mul(&A, &B, &C, false);
+        break;
+    case 2:
+        strassen_mul(&A, &B, &C, true);
+        break;
     }
-    end = clock();
-    time_spent = (double)(end - begin) / (CLOCKS_PER_SEC);
-    printf("%lf\n",time_spent);    
 
+    gettimeofday(&end, NULL);
+    int time_spent = (1e6) * (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec);
+
+    printf("%d ms\n",time_spent);    
     return 0;
-
-
-
-    pthread_t t[thread_count];
-    int param_i[thread_count];
-    for(int i = 0; i < thread_count; i++) {
-        param_i[i] = i;
-        pthread_create(&t[i], NULL, child, &param_i[i]);
-    }
-
-    for(int i = 0; i < thread_count; i++) {
-        pthread_join(t[i], NULL);
-    }
-
-
 }
