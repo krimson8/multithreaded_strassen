@@ -11,6 +11,7 @@
 typedef struct _Matrix {
     int **v;
     int size;
+    bool shadow_copy;
 } Matrix;
 
 typedef struct _ThreadParam {
@@ -18,7 +19,29 @@ typedef struct _ThreadParam {
     int id;
 } ThreadParam;
 
-bool transpose = false;
+#define STRASSEN_THRESHOLD 32
+bool TRANSPOSE = false;
+bool SHADOW_COPY = false;
+bool CONTINUE_STRASSEN = false;
+
+void strassen_mul(const Matrix *A_all, const Matrix *B_all, Matrix *C_all, bool parallel);
+
+void matrix_free(Matrix *thiz)
+{
+    assert(thiz != NULL);
+    assert(thiz->v != NULL);
+    if (!thiz->shadow_copy) {
+        free(thiz->v[0]);
+    }
+    free(thiz->v);
+    thiz->v = NULL;
+}
+
+void matrixs_free(Matrix *thiz, int num)
+{
+    for (int i = 0; i < num; ++i)
+        matrix_free(&thiz[i]);
+}
 
 void matrix_create(Matrix *thiz, int size)
 {
@@ -40,14 +63,21 @@ void matrix_try_create(Matrix *thiz, int size)
 
 void matrix_read(Matrix *thiz, FILE *fp)
 {
+    assert(fp != NULL);
     int m, n;
-    fscanf(fp, "%d %d", &m, &n);
+    if (fscanf(fp, "%d %d", &m, &n) != 2) {
+        perror("when read size");
+        exit(EXIT_FAILURE);
+    }
     assert(m == n);
     matrix_try_create(thiz, m);
-    if (fp) {
-        for (int i = 0; i < m; ++i)
-            for (int j = 0; j < m; ++j)
-                fscanf(fp, "%d", &(thiz->v[i][j]));
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < m; ++j) {
+            if (fscanf(fp, "%d", &(thiz->v[i][j])) != 1) {
+                perror("when read size");
+                exit(EXIT_FAILURE);
+            }
+        }
     }
 }
 
@@ -94,7 +124,10 @@ void matrix_mul(const Matrix *A, const Matrix *B, Matrix *C)
 {
     matrix_check_AB_try_create_C(A, B, C);
     int size = A->size;
-    if(transpose) {
+    for (int i = 0; i < size; ++i)
+        memset(C->v[i], 0, size * sizeof(int));
+
+    if(TRANSPOSE) {
         for (int i = 0; i < size; ++i) {
             for (int k = 0; k < size; ++k) {
                 for (int j = 0; j < size; ++j) {
@@ -105,14 +138,12 @@ void matrix_mul(const Matrix *A, const Matrix *B, Matrix *C)
     } else {
         for (int i = 0; i < size; ++i) {
             for (int j = 0; j < size; ++j) {
-                C->v[i][j] = 0;
                 for (int k = 0; k < size; ++k) {
                     C->v[i][j] += A->v[i][k] * B->v[k][j];
                 }
             }
         }
     }
-    
 }
 
 void matrix_divide_4(const Matrix *thiz, Matrix *block)
@@ -121,11 +152,26 @@ void matrix_divide_4(const Matrix *thiz, Matrix *block)
     int size_divided = size/2;
     for (int i = 0; i < 4; ++i)
         matrix_try_create(&block[i], size_divided);
-    for (int j = 0; j < size_divided; ++j) {
-        block[0].v[j] = thiz->v[j]; // TODO memory leak !
-        block[1].v[j] = thiz->v[j] + size_divided;
-        block[2].v[j] = thiz->v[j+size_divided];
-        block[3].v[j] = thiz->v[j+size_divided] + size_divided;
+    if (SHADOW_COPY) {
+        for (int i = 0; i < 4; ++i) {
+            free(block[i].v[0]);
+            block[i].shadow_copy = true;
+        }
+        for (int i = 0; i < size_divided; ++i) {
+            block[0].v[i] = thiz->v[i];
+            block[1].v[i] = thiz->v[i] + size_divided;
+            block[2].v[i] = thiz->v[i+size_divided];
+            block[3].v[i] = thiz->v[i+size_divided] + size_divided;
+        }
+    } else {
+        for (int i = 0; i < size_divided; ++i) {
+            for (int j = 0; j < size_divided; ++j) {
+                block[0].v[i][j] = thiz->v[i][j];
+                block[1].v[i][j] = thiz->v[i][j+size_divided];
+                block[2].v[i][j] = thiz->v[i+size_divided][j];
+                block[3].v[i][j] = thiz->v[i+size_divided][j+size_divided]; 
+            }
+        }
     }
 }
 
@@ -144,38 +190,48 @@ void matrix_combine_4(Matrix *thiz, const Matrix *block)
     }
 }
 
+void strassen_mul_no_parallel(const Matrix *A, const Matrix *B, Matrix *C)
+{
+    strassen_mul(A, B, C, false);
+}
+
 void _strassen_mul(const Matrix *A, const Matrix *B, Matrix *M, Matrix *tmp, const int id)
 {
+    void (*mul_func)(const Matrix*, const Matrix*, Matrix*) = matrix_mul;
+    if (CONTINUE_STRASSEN) {
+        mul_func = strassen_mul_no_parallel;
+    }
+
     if (id == -1 || id == 0) {
         matrix_add(&A[0], &A[3], &tmp[0]);
         matrix_add(&B[0], &B[3], &tmp[1]);
-        matrix_mul(&tmp[0], &tmp[1], &M[0]);
+        mul_func(&tmp[0], &tmp[1], &M[0]);
     }
     if (id == -1 || id == 1) {
         matrix_add(&A[2], &A[3], &tmp[2]);
-        matrix_mul(&tmp[2], &B[0], &M[1]);
+        mul_func(&tmp[2], &B[0], &M[1]);
     }
     if (id == -1 || id == 2) {
         matrix_sub(&B[1], &B[3], &tmp[3]);
-        matrix_mul(&A[0], &tmp[3], &M[2]);
+        mul_func(&A[0], &tmp[3], &M[2]);
     }
     if (id == -1 || id == 3) {
         matrix_sub(&B[2], &B[0], &tmp[4]);
-        matrix_mul(&A[3], &tmp[4], &M[3]);
+        mul_func(&A[3], &tmp[4], &M[3]);
     }
     if (id == -1 || id == 4) {
         matrix_add(&A[0], &A[1], &tmp[5]);
-        matrix_mul(&tmp[5], &B[3], &M[4]);
+        mul_func(&tmp[5], &B[3], &M[4]);
     }
     if (id == -1 || id == 5) {
         matrix_sub(&A[2], &A[0], &tmp[6]);
         matrix_add(&B[0], &B[1], &tmp[7]);
-        matrix_mul(&tmp[6], &tmp[7], &M[5]);
+        mul_func(&tmp[6], &tmp[7], &M[5]);
     }
     if (id == -1 || id == 6) {
         matrix_sub(&A[1], &A[3], &tmp[8]);
         matrix_add(&B[2], &B[3], &tmp[9]);
-        matrix_mul(&tmp[8], &tmp[9], &M[6]);
+        mul_func(&tmp[8], &tmp[9], &M[6]);
     }
 }
 
@@ -186,8 +242,14 @@ void* pthread_func(void *arg)
     pthread_exit(NULL);
 }
 
-void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel)
+void strassen_mul(const Matrix *A_all, const Matrix *B_all, Matrix *C_all, bool parallel)
 {
+    int size = A_all->size;
+    if (size <= STRASSEN_THRESHOLD) {
+        matrix_mul(A_all, B_all, C_all);
+        return;
+    }
+
     Matrix A[4] = {0},
            B[4] = {0},
            C[4] = {0},
@@ -224,12 +286,18 @@ void strassen_mul(Matrix *A_all, Matrix *B_all, Matrix *C_all, bool parallel)
     matrix_add(&tmp[0], &M[5], &C[3]);
 
     matrix_combine_4(C_all, C);
+
+    matrixs_free(A, 4);
+    matrixs_free(B, 4);
+    matrixs_free(C, 4);
+    matrixs_free(M, 7);
+    matrixs_free(tmp, 10);
 }
 
 int main(int argc, const char **argv)
 {
-    if (argc != 3) {
-        puts("./main path/to/test/data type_of_mul");
+    if (argc < 3) {
+        puts("./main path/to/test/data type_of_mul [print? (0,1)]");
         exit(EXIT_FAILURE);
     }
 
@@ -243,9 +311,6 @@ int main(int argc, const char **argv)
     Matrix A = {0},
            B = {0},
            C = {0};
-    memset(&A, 0, sizeof(Matrix));
-    memset(&B, 0, sizeof(Matrix));
-    memset(&C, 0, sizeof(Matrix));
     matrix_read(&A, fp);
     matrix_read(&B, fp);
     fclose(fp);
@@ -254,34 +319,51 @@ int main(int argc, const char **argv)
     gettimeofday(&start, NULL);
 
     switch (mul_type) {
-    case 0:
-        printf("Matrix multiplication using ordinary method: \n");
-        matrix_mul(&A, &B, &C);
-        break;
-    case 1:
-        printf("Matrix multiplication using ordinary method\nwith cache friendly utilization: \n");
-        transpose = true;
-        matrix_mul(&A, &B, &C);
-        break;
-    case 2:
-        printf("Matrix multiplication using strassen method: \n");
-        strassen_mul(&A, &B, &C, false);
-        break;
-    case 3:
-        printf("Matrix multiplication using multithreaded strassen method: \n");
-        strassen_mul(&A, &B, &C, true);
-        break;
-    case 4:
-        printf("Matrix multiplication using multithreaded strassen method\nwith cache friendly utilization: \n");
-        transpose = true;
-        strassen_mul(&A, &B, &C, true);
-        break;
-    default:
-        fprintf(stderr, "wrong mul type (argv[2])");
-        exit(EXIT_FAILURE);
+        case 0:
+            puts("ordinary");
+            matrix_mul(&A, &B, &C);
+            break;
+        case 1:
+            puts("ordinary + cache friendly");
+            TRANSPOSE = true;
+            matrix_mul(&A, &B, &C);
+            break;
+        case 2:
+            puts("strassen + cache friendly");
+            TRANSPOSE = true;
+            strassen_mul(&A, &B, &C, false);
+            break;
+        case 3:
+            puts("strassen + cache friendly + multithread");
+            TRANSPOSE = true;
+            strassen_mul(&A, &B, &C, true);
+            break;
+        case 4:
+            puts("strassen + cache friendly + multithread + keep strassen");
+            TRANSPOSE = true;
+            CONTINUE_STRASSEN = true;
+            strassen_mul(&A, &B, &C, true);
+            break;
+        case 5:
+            puts("strassen + cache friendly + multithread + keep strassen + shadow copy");
+            TRANSPOSE = true;
+            CONTINUE_STRASSEN = true;
+            SHADOW_COPY = true;
+            strassen_mul(&A, &B, &C, true);
+            break;
+        case 6:
+            puts("strassen + multithread + keep strassen + shadow copy");
+            CONTINUE_STRASSEN = true;
+            SHADOW_COPY = true;
+            strassen_mul(&A, &B, &C, true);
+            break;
+        default:
+            fprintf(stderr, "wrong mul type (0~6)");
+            exit(EXIT_FAILURE);
     }
 
-    // matrix_print(C);
+    if (argc == 4 && atoi(argv[3]) == true)
+        matrix_print(C);
 
     gettimeofday(&end, NULL);
     int time_spent = (1e6) * (end.tv_sec - start.tv_sec) + (end.tv_usec - start.tv_usec);
